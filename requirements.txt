@@ -13,7 +13,7 @@ matplotlib==3.9.0
 ml-dtypes==0.3.2
 numpy==1.26.4
 pandas==1.5.3
-protobuf==4.25.3
+protobuf==4.23.4
 PyALE==1.2.0
 pyDVL==0.8.0
 PyYAML==6.0.1

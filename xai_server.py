@@ -293,6 +293,8 @@ class ExplainabilityExecutor(ExplanationsServicer):
             runs_json = request.runs_json
             try:
                 runs = json.loads(runs_json)
+                runs = [run for run in runs if run.get('status', '').lower() == 'completed']
+                
             except json.JSONDecodeError as e:
                 msg = f"Invalid runs_json payload: {e}"
                 logger.error(msg)
@@ -317,8 +319,8 @@ class ExplainabilityExecutor(ExplanationsServicer):
                 'mca_inertia_threshold': 0.8,
                 'corr_threshold': 0.75,
                 'eta_threshold': 0.33,
-                'min_k': 2,
-                'max_k': 20,
+                'min_k': 3,
+                'max_k': 6,
                 'n_std': 1.5,
             }
 

@@ -482,7 +482,7 @@ def step_filter_high_variance_metrics(results, pipeline, **kwargs):
         'removed_high_variance': filter_info.get('removed_metrics', [])
     }
 
-def apply_elbow_method_pca(X_scaled, max_components=None, variance_threshold=0.95):
+def apply_elbow_method_pca(X_scaled, max_components=None, variance_threshold=0.85):
     """
     Apply elbow method to determine optimal number of PCA components
     for numerical variables (SPCA simulation using standard PCA).
@@ -498,28 +498,14 @@ def apply_elbow_method_pca(X_scaled, max_components=None, variance_threshold=0.9
         explained_variance_ratio: Array of explained variance ratios
         cumulative_variance: Array of cumulative explained variance
     """
-    if max_components is None:
-        max_components = min(X_scaled.shape[0] - 1, X_scaled.shape[1])
-    
-    pca = PCA(n_components=max_components)
+    # Always use 2 PCA components, ignore dynamic logic
+    n_components = 2
+    pca = PCA(n_components=n_components)
     pca.fit(X_scaled)
-    
-    # Calculate cumulative variance explained
-    cumulative_variance = np.cumsum(pca.explained_variance_ratio_)
-    
-    # Find optimal number of components based on variance threshold
-    optimal_n_components = np.argmax(cumulative_variance >= variance_threshold) + 1
-    
-    # If threshold not reached, use elbow method (largest decrease in variance)
-    if cumulative_variance[-1] < variance_threshold:
-        variance_diffs = np.diff(pca.explained_variance_ratio_)
-        # Find elbow: steepest drop in variance explained
-        elbow_point = np.argmax(np.diff(variance_diffs))
-        optimal_n_components = max(elbow_point + 2, 2)  # At least 2 components
-    
-    
-    
-    return optimal_n_components, pca, pca.explained_variance_ratio_, cumulative_variance
+    explained_variance_ratio = pca.explained_variance_ratio_
+    cumulative_variance = np.cumsum(explained_variance_ratio)
+    optimal_n_components = n_components
+    return optimal_n_components, pca, explained_variance_ratio, cumulative_variance
 
 
 def reduce_dimensions(df, metric_cols, pca_variance_threshold, mca_inertia_threshold,
