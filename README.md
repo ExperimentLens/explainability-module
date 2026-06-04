@@ -40,7 +40,7 @@ For Model Explanations:
 ### Download Source Code
 
 ```shell
-git clone https://colab-repo.intracom-telecom.com/colab-projects/extremexp/user-interaction/explainability/explainability-module.git
+git clone https://github.com/ExperimentLens/explainability-module.git
 ```
 ### Navigate to the Project Directory
 Change your current directory to the project directory
