@@ -1,0 +1,13 @@
+# Keep secrets/notebooks/caches OUT of the image.
+# NOTE: this Dockerfile is single-stage (COPY . .), so without this file the .env
+# (OLLAMA_API_KEY) would be baked into the published image. OLLAMA_API_KEY is supplied
+# at runtime via docker-compose `env_file`, so it is not needed inside the image.
+.git/
+.gitignore
+.env
+__pycache__/
+**/__pycache__/
+*.pyc
+.DS_Store
+*.ipynb
+*.log
