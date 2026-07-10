@@ -262,15 +262,15 @@ class PDPHandler(BaseExplanationHandler):
                             axis_type=''                    
                 )
             )
-        elif explanation_type == 'hyperparameterExplanation':
+        elif explanation_type in ('hyperparameterExplanation', 'llmHyperparameterExplanation'):
             hyper_configs = request.hyper_configs
             hyper_space = create_hyperspace(hyper_configs)
             hyper_df, sorted_metrics = create_hyper_df(hyper_configs)
-            
+
             logger.info('Training Surrogate Model...')
             surrogate_model = self._load_or_train_surrogate_model(hyper_df,sorted_metrics)
             logger.info("Trained Surrogate Model.")
-            
+
             param_grid = transform_grid(hyper_space)
             param_space, name = dimensions_aslists(param_grid)
             space = Space(param_space)
@@ -283,12 +283,12 @@ class PDPHandler(BaseExplanationHandler):
                 # if space.dimensions[row].is_constant:
                 #     continue
                 plot_dims.append((row, space.dimensions[row]))
-                
+
             pdp_samples = space.rvs(n_samples=1000,random_state=123456)
             if not request.feature1:
                 logger.warning('Feature is missing, initializing with first hyperparameter from hyperparameters list')
                 feature = name[0]
-            else: 
+            else:
                 feature = request.feature1
 
             xi = []
@@ -484,7 +484,7 @@ class TwoDPDPHandler(BaseExplanationHandler):
                             axis_type='numerical'                    
                 ),
             )
-        elif explanation_type == 'hyperparameterExplanation':
+        elif explanation_type in ('hyperparameterExplanation', 'llmHyperparameterExplanation'):
             hyper_configs = request.hyper_configs
             hyper_space = create_hyperspace(hyper_configs)
             hyper_df,sorted_metrics = create_hyper_df(hyper_configs)
@@ -689,7 +689,7 @@ class ALEHandler(BaseExplanationHandler):
                 ),
                 
             )
-        elif explanation_type == 'hyperparameterExplanation':
+        elif explanation_type in ('hyperparameterExplanation', 'llmHyperparameterExplanation'):
             hyper_configs = request.hyper_configs
             hyper_space = create_hyperspace(hyper_configs)
             hyper_df,sorted_metrics = create_hyper_df(hyper_configs)
