@@ -38,3 +38,7 @@ shap
 prince==0.13.0
 imodels==2.0.4
 requests>=2.0.0
+openai
+# llmSHAP (github.com/filipnaudot/llmSHAP, MIT) is vendored under ./llmSHAP instead of
+# pip-installed: the published package declares Requires-Python >=3.11, but it is pure
+# Python with no 3.11-only syntax and runs fine on the 3.10 stack used here (verified).

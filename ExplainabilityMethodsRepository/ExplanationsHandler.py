@@ -1682,3 +1682,183 @@ class FeatureImportanceHandler(BaseExplanationHandler):
 
         else:
             raise ValueError(f"Unknown explanation type: {explanation_type}")
+
+
+class RagAttributionHandler(BaseExplanationHandler):
+    """RAG attribution (llmSHAP Shapley values), chunk-level or sentence-level (per
+    request.rag_granularity) + a counterfactual check on the top-attributed feature, run
+    against a local Ollama model."""
+
+    def handle(self, request, explanation_type):
+        print("request:", request)
+        print("explanation_type:", explanation_type)
+        if explanation_type != 'llmExplanation':
+            raise ValueError(f"Unsupported explanation_type {explanation_type} for rag attribution")
+
+        retrieved_chunks = list(request.rag_retrieved_chunks)
+        retrieved_sources = list(request.rag_retrieved_sources)
+
+        if not retrieved_chunks:
+            raise ValueError("rag_retrieved_chunks must be non-empty")
+        if len(retrieved_chunks) != len(retrieved_sources):
+            raise ValueError("rag_retrieved_chunks and rag_retrieved_sources must have the same length")
+
+        # 0 = unset on the wire (int32 has no presence tracking, unlike run_counterfactual) ->
+        # fall back to a sane default so wide-open Ollama completions don't dominate runtime.
+        max_tokens = request.rag_max_tokens or 200
+
+        granularity = request.rag_granularity or 'chunk'
+        if granularity == 'sentence':
+            return self._handle_sentence(
+                request, explanation_type, retrieved_chunks, retrieved_sources, max_tokens
+            )
+        if granularity == 'chunk':
+            return self._handle_chunk(
+                request, explanation_type, retrieved_chunks, retrieved_sources, max_tokens
+            )
+        raise ValueError(f"Unsupported rag_granularity: {granularity!r} (expected 'chunk' or 'sentence')")
+
+    def _handle_chunk(self, request, explanation_type, retrieved_chunks, retrieved_sources, max_tokens):
+        from ExplainabilityMethodsRepository.rag_attribution import (
+            chunk_label,
+            counterfactual_check,
+            explain_chunks,
+        )
+
+        result = explain_chunks(
+            question=request.rag_question,
+            retrieved_chunks=retrieved_chunks,
+            retrieved_sources=retrieved_sources,
+            prompt_template=request.rag_prompt_template,
+            model_name=request.rag_model_name,
+            temperature=request.rag_temperature,
+            max_tokens=max_tokens,
+        )
+
+        attribution_map = result["attribution"]
+        attribution_entries = []
+        for i, (chunk, source) in enumerate(zip(retrieved_chunks, retrieved_sources)):
+            label = chunk_label(i, source)
+            item = attribution_map.get(label, {"value": chunk, "score": 0.0})
+            attribution_entries.append(
+                xai_service_pb2.RagAttributionEntry(
+                    chunk_label=label,
+                    source=source,
+                    text=item.get("value", chunk),
+                    score=float(item.get("score", 0.0)),
+                )
+            )
+
+        response = xai_service_pb2.ExplanationsResponse(
+            explainability_type=explanation_type,
+            explanation_method='rag_attribution',
+            explainability_model=request.rag_model_name,
+            plot_name='RAG Chunk Attribution',
+            plot_descr="Shapley-value attribution of each retrieved chunk's contribution to the generated answer.",
+            plot_type='BarPlot',
+            rag_output=result["output"],
+            rag_attribution=attribution_entries,
+            rag_heatmap=result["heatmap"],
+        )
+
+        if request.run_counterfactual and attribution_entries:
+            top_entry = max(attribution_entries, key=lambda e: e.score)
+            top_index = next(
+                i for i, e in enumerate(attribution_entries) if e.chunk_label == top_entry.chunk_label
+            )
+            cf_result = counterfactual_check(
+                question=request.rag_question,
+                retrieved_chunks=retrieved_chunks,
+                retrieved_sources=retrieved_sources,
+                prompt_template=request.rag_prompt_template,
+                model_name=request.rag_model_name,
+                temperature=request.rag_temperature,
+                top_chunk_index=top_index,
+                max_tokens=max_tokens,
+            )
+            response.rag_counterfactual.CopyFrom(
+                xai_service_pb2.RagCounterfactual(
+                    top_chunk_label=top_entry.chunk_label,
+                    original_answer=cf_result["original_answer"],
+                    counterfactual_answer=cf_result["counterfactual_answer"],
+                    changed=cf_result["changed"],
+                    similarity_score=cf_result["similarity_score"],
+                )
+            )
+
+        return response
+
+    def _handle_sentence(
+        self, request, explanation_type, retrieved_chunks, retrieved_sources, max_tokens
+    ):
+        from ExplainabilityMethodsRepository.rag_attribution import (
+            counterfactual_check_sentence,
+            explain_sentences,
+        )
+
+        result = explain_sentences(
+            question=request.rag_question,
+            retrieved_chunks=retrieved_chunks,
+            retrieved_sources=retrieved_sources,
+            prompt_template=request.rag_prompt_template,
+            model_name=request.rag_model_name,
+            temperature=request.rag_temperature,
+            max_tokens=max_tokens,
+        )
+
+        attribution_map = result["attribution"]
+        origin = result["origin"]
+        attribution_entries = [
+            xai_service_pb2.RagAttributionEntry(
+                chunk_label=key,
+                source=origin[key][1],
+                text=item.get("value", ""),
+                score=float(item.get("score", 0.0)),
+            )
+            for key, item in attribution_map.items()
+        ]
+
+        response = xai_service_pb2.ExplanationsResponse(
+            explainability_type=explanation_type,
+            explanation_method='rag_attribution',
+            explainability_model=request.rag_model_name,
+            plot_name='RAG Sentence Attribution',
+            plot_descr=(
+                "Shapley-value attribution of each instruction/context sentence's contribution "
+                "to the generated answer (question pinned, always present)."
+            ),
+            plot_type='BarPlot',
+            rag_output=result["output"],
+            rag_attribution=attribution_entries,
+            rag_heatmap=result["heatmap"],
+        )
+
+        if request.run_counterfactual and attribution_entries:
+            # The pinned question always scores 0, so excluding it keeps the "top" pick
+            # meaningful even when every other sentence also nets out near 0.
+            scored_entries = [e for e in attribution_entries if origin[e.chunk_label][1] != 'question']
+            if scored_entries:
+                top_entry = max(scored_entries, key=lambda e: e.score)
+                cf_result = counterfactual_check_sentence(
+                    question=request.rag_question,
+                    retrieved_chunks=retrieved_chunks,
+                    retrieved_sources=retrieved_sources,
+                    prompt_template=request.rag_prompt_template,
+                    model_name=request.rag_model_name,
+                    temperature=request.rag_temperature,
+                    top_key=top_entry.chunk_label,
+                    origin=origin,
+                    max_tokens=max_tokens,
+                )
+                if cf_result is not None:
+                    response.rag_counterfactual.CopyFrom(
+                        xai_service_pb2.RagCounterfactual(
+                            top_chunk_label=top_entry.chunk_label,
+                            original_answer=cf_result["original_answer"],
+                            counterfactual_answer=cf_result["counterfactual_answer"],
+                            changed=cf_result["changed"],
+                            similarity_score=cf_result["similarity_score"],
+                        )
+                    )
+
+        return response

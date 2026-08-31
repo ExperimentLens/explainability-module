@@ -73,6 +73,7 @@ class ExplainabilityExecutor(ExplanationsServicer):
             ('featureExplanation', 'segmentation'): SegmentationAttributionHandler(),
             ('featureExplanation', 'shap'): SHAPHandler(),
             ('experimentExplanation', 'feature_importance'): FeatureImportanceHandler(),
+            ('llmExplanation', 'rag_attribution'): RagAttributionHandler(),
             # Add more handlers as needed
         }
         

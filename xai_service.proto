@@ -61,6 +61,17 @@ message ExplanationsRequest {
 
     // Experiment Explainability - specific
     map<string, hyperparameters> experiment_configs = 15; // map with variability point configs and respective metrics
+
+    // ----- RAG / LLM Explainability (llmSHAP chunk attribution over retrieved_chunks) -----
+    string rag_question = 16;
+    repeated string rag_retrieved_chunks = 17;
+    repeated string rag_retrieved_sources = 18;
+    string rag_prompt_template = 19;
+    string rag_model_name = 20;
+    double rag_temperature = 21;
+    optional bool run_counterfactual = 22;
+    string rag_granularity = 23; // "chunk" (default) or "sentence"
+    int32 rag_max_tokens = 24; // 0 = use server default (200)
 }
 
 
@@ -116,6 +127,27 @@ message ExplanationsResponse {
     string segmentation_process_step = 26;
 
     repeated ShapContributions shap_contributions = 27;
+
+    // ----- RAG / LLM Explainability (llmSHAP chunk attribution) -----
+    string rag_output = 28;
+    repeated RagAttributionEntry rag_attribution = 29;
+    string rag_heatmap = 30;
+    RagCounterfactual rag_counterfactual = 31;
+}
+
+message RagAttributionEntry {
+    string chunk_label = 1;
+    string source = 2;
+    string text = 3;
+    double score = 4;
+}
+
+message RagCounterfactual {
+    string top_chunk_label = 1;
+    string original_answer = 2;
+    string counterfactual_answer = 3;
+    bool changed = 4;
+    double similarity_score = 5;
 }
 
 //------------------ Apply Affected Actions --------------------------------------------------
