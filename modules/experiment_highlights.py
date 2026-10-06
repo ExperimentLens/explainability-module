@@ -658,10 +658,27 @@ def reduce_dimensions(df, metric_cols, pca_variance_threshold, mca_inertia_thres
     
     
     # Summary statistics
-    
+
     for comp_name in component_names:
         print(f"  - {comp_name}")
-    
+
+    # Neither the PCA nor the MCA branch ran (no numerical_cols, no categorical_cols),
+    # so `reduced_data` has zero columns. Left unchecked, that 0-column DataFrame
+    # reaches KMeans.fit_predict() several steps later and fails with a cryptic
+    # numpy/sklearn error ("at least one array or dtype is required") that gives no
+    # indication of the real cause. Fail here instead, with a message that actually
+    # explains what's wrong: no metric/param column had enough variation to be
+    # classified as numerical or categorical after filtering.
+    if reduced_data.shape[1] == 0:
+        raise ValueError(
+            "No usable metrics or parameters remain for clustering: "
+            f"{len(metric_cols)} column(s) were provided ({', '.join(metric_cols) or 'none'}), "
+            "but none had enough variation to be classified as numerical or categorical — "
+            "they may be constant, entirely missing, or filtered out by the low/high "
+            "variance thresholds. This experiment needs at least one metric or "
+            "hyperparameter that varies across its completed runs to compute highlights."
+        )
+
     # Create reduction info dictionary
     reduction_info = {
         'n_original_variables': len(metric_cols),
@@ -800,20 +817,34 @@ def step_find_optimal_clusters(results, pipeline, **kwargs):
     
     min_k = kwargs.get('min_k', 3)
     max_k = kwargs.get('max_k', 9)
-    
+
+    n_samples = len(reduced_data)
+    # silhouette_score requires 2 <= n_labels <= n_samples - 1, so k can never
+    # reach n_samples itself (that's every point in its own cluster, which
+    # isn't scoreable). Cap the search range to the data actually available
+    # instead of letting KMeans/silhouette_score crash with an opaque
+    # "Number of labels is N. Valid values are 2 to n_samples - 1" error.
+    effective_max_k = min(max_k, n_samples)
+    if effective_max_k <= min_k:
+        raise ValueError(
+            f"Not enough completed runs to search for clusters: {n_samples} run(s) available, "
+            f"but at least {min_k + 1} are needed to try cluster counts from {min_k} up to "
+            "n_samples - 1."
+        )
+
     print("\nFinding optimal number of clusters...")
     silhouette_scores = []
-    
-    for k in range(min_k, max_k):
+
+    for k in range(min_k, effective_max_k):
         kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
         labels = kmeans.fit_predict(reduced_data)
         score = silhouette_score(X_scaled, labels)
         silhouette_scores.append(score)
         print(f"  k={k}, Silhouette Score: {score:.3f}")
-    
-    optimal_k = list(range(min_k, max_k))[np.argmax(silhouette_scores)]
+
+    optimal_k = list(range(min_k, effective_max_k))[np.argmax(silhouette_scores)]
     print(f"\nOptimal number of clusters: {optimal_k}")
-    
+
     return {'optimal_k': optimal_k, 'silhouette_scores': silhouette_scores}
 
 def cluster_workflows(X_scaled, n_clusters=4, random_state=42):
@@ -1752,41 +1783,62 @@ def step_phase1_model_training_and_evaluation(results, pipeline, **kwargs):
         feature_indices = [metric_cols.index(f) for f in selected_features]
         X_selected = X_standardized[:, feature_indices]
         
-        # Train-test split (80-20)
-        # Check if we have enough samples for stratification
+        # Train-test split (80-20). Always stratify: the `min_class_count < 2`
+        # check above already guarantees both classes have at least 2 members,
+        # which is all sklearn's stratify needs for a single split. A plain
+        # random split was used here for small minority classes, but with a
+        # tiny dataset (a handful of runs) that let the 20% test slice land
+        # entirely on one class by chance — roc_auc_score then crashes with
+        # "Only one class present in y_true" a few lines down. Stratifying
+        # guarantees both classes appear in the test set whenever they can.
         if min_class_count < 10:
-            # Don't use stratify if classes are too imbalanced
-            print(f"Warning: Minority class has only {min_class_count} samples, using random split instead of stratified")
-            X_train, X_test, y_train, y_test = train_test_split(
-                X_selected, y_binary, test_size=0.2, random_state=42
-            )
-        else:
-            X_train, X_test, y_train, y_test = train_test_split(
-                X_selected, y_binary, test_size=0.2, random_state=42, stratify=y_binary
-            )
+            print(f"Warning: Minority class has only {min_class_count} samples; splitting with stratify to keep both classes in the test set")
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_selected, y_binary, test_size=0.2, random_state=42, stratify=y_binary
+        )
         
         print(f"Train: {len(X_train)} | Test: {len(X_test)}")
         print(f"Class distribution (train): {np.bincount(y_train)}")
         print(f"Class distribution (test): {np.bincount(y_test)}")
         
         # ========== Hyperparameter Grid Search ==========
-        print(f"\nPerforming hyperparameter grid search with 5-fold cross-validation...")
-        
         param_grid = {
             'max_depth': [3, 5, 7],
             'n_estimators': [30, 60],
             'eta': [0.15, 0.25],
         }
-        
-        xgb_base = xgb.XGBClassifier(random_state=42, eval_metric='auc', verbosity=0)
-        grid_search = GridSearchCV(xgb_base, param_grid, cv=5, scoring='roc_auc', n_jobs=-1, verbose=0)
-        grid_search.fit(X_train, y_train)
-        
-        best_model = grid_search.best_estimator_
-        best_params = grid_search.best_params_
-        best_cv_score = grid_search.best_score_
-        
-        print(f"✓ Best CV AUC: {best_cv_score:.4f}")
+
+        # GridSearchCV's default scoring here uses StratifiedKFold, which needs
+        # at least `cv` members of EACH class in the training set — cv=5
+        # crashes outright on a small cluster ("n_splits=5 cannot be greater
+        # than the number of members in each class"). Cap folds to what the
+        # data can actually support, and skip grid search entirely (fit one
+        # reasonable default) when even 2-fold CV isn't possible.
+        train_class_counts = np.bincount(y_train)
+        min_train_class_count = int(train_class_counts[train_class_counts > 0].min())
+        cv_folds = min(5, min_train_class_count)
+
+        if cv_folds < 2:
+            print(f"⊘ Cluster {cluster_id}: smallest training class has only {min_train_class_count} sample(s) — "
+                  f"too few for cross-validation, fitting with default hyperparameters instead of grid search")
+            best_params = {'max_depth': 5, 'n_estimators': 60, 'eta': 0.15}
+            best_model = xgb.XGBClassifier(random_state=42, eval_metric='auc', verbosity=0, **best_params)
+            best_model.fit(X_train, y_train)
+            best_cv_score = None
+        else:
+            if cv_folds < 5:
+                print(f"Warning: smallest training class has {min_train_class_count} sample(s); "
+                      f"reducing grid-search CV folds from 5 to {cv_folds}")
+            print(f"\nPerforming hyperparameter grid search with {cv_folds}-fold cross-validation...")
+            xgb_base = xgb.XGBClassifier(random_state=42, eval_metric='auc', verbosity=0)
+            grid_search = GridSearchCV(xgb_base, param_grid, cv=cv_folds, scoring='roc_auc', n_jobs=-1, verbose=0)
+            grid_search.fit(X_train, y_train)
+
+            best_model = grid_search.best_estimator_
+            best_params = grid_search.best_params_
+            best_cv_score = grid_search.best_score_
+
+        print(f"✓ Best CV AUC: {best_cv_score:.4f}" if best_cv_score is not None else "✓ Fit with default hyperparameters (no grid search)")
         print(f"  Best parameters: {best_params}")
         
         # ========== Model Evaluation ==========
@@ -1795,7 +1847,17 @@ def step_phase1_model_training_and_evaluation(results, pipeline, **kwargs):
         y_pred = best_model.predict(X_test)
         y_pred_proba = best_model.predict_proba(X_test)[:, 1]
         
-        auc = roc_auc_score(y_test, y_pred_proba)
+        # Belt-and-suspenders: stratification above should guarantee both
+        # classes land in y_test, but fall back instead of crashing the whole
+        # request if an edge case (e.g. a 1-sample test set) still slips
+        # through. 0.0 matches this file's existing "no valid AUC" sentinel
+        # (see the fallback model_evaluation dicts below) rather than NaN,
+        # which downstream JSON serialization on the Java side can't handle.
+        if len(np.unique(y_test)) < 2:
+            print(f"⊘ Cluster {cluster_id}: test set has only one class present ({np.unique(y_test)}); AUC is undefined, reporting 0.0")
+            auc = 0.0
+        else:
+            auc = roc_auc_score(y_test, y_pred_proba)
         balanced_acc = balanced_accuracy_score(y_test, y_pred)
 
         # Ensure confusion matrix and report always account for both classes (0 and 1)

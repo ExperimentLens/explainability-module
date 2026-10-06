@@ -323,7 +323,19 @@ class ExplainabilityExecutor(ExplanationsServicer):
                 'n_std': 1.5,
             }
 
-            pipeline.run(**pipeline_params)
+            try:
+                pipeline.run(**pipeline_params)
+            except ValueError as e:
+                # Data-shape validation errors (e.g. no usable metrics left for
+                # clustering after filtering) are a precondition failure on this
+                # experiment's data, not a server bug — report them as such
+                # instead of letting them fall through to the generic INTERNAL
+                # handler below with a raw, uninformative stack-trace message.
+                msg = str(e)
+                logger.error(f"[RunExperimentHighlights] {msg}")
+                context.set_details(msg)
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+                return xai_service_pb2.ExperimentRunsResponse(success=False, message=msg)
 
             # 4) Collect clustering results
             df_clustered = pipeline.get_result('step_save_results', key='df_clustered')
